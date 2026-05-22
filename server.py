@@ -6,10 +6,11 @@ import base64
 import time
 import os
 import math
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, send_from_directory
 from datetime import datetime
 
 app = Flask(__name__)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @app.after_request
 def add_cors(response):
@@ -333,6 +334,12 @@ def atualizar_nivel(pontos):
     if pontos >= 500:   return "Broto"
     return "Semente"
 
+# ─── frontend (mesmo serviço no Render) ───────────────────────────
+
+@app.route("/")
+def serve_index():
+    return send_from_directory(ROOT_DIR, "index.html")
+
 # ─── rotas de autenticação ────────────────────────────────────────
 
 @app.route("/api/auth/cadastro", methods=["POST"])
@@ -602,8 +609,11 @@ def stats_gerais():
 
 # ─── inicialização ────────────────────────────────────────────────
 
+init_db()
+
 if __name__ == "__main__":
-    init_db()
-    print("EcoCollect API rodando em http://localhost:5000")
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    print(f"EcoCollect rodando em http://localhost:{port}")
     print("Banco de dados:", DB_PATH)
-    app.run(debug=True, port=5000)
+    app.run(debug=debug, host="0.0.0.0", port=port)

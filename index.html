@@ -276,7 +276,7 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const API = "http://localhost:5000/api";
+const API = "/api";
 const JOINVILLE = [-26.3045, -48.8487];
 let TOKEN = localStorage.getItem("eco_token");
 let USER = null;
@@ -325,7 +325,7 @@ async function api(method, path, body) {
     r = await fetch(API + path, opts);
   } catch {
     throw new Error(
-      "Servidor offline. Execute start.ps1 ou rode: python server.py (porta 5000)"
+      "Não foi possível conectar ao servidor. Verifique se a API está no ar."
     );
   }
   let data;
