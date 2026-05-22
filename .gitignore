@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+.venv/
+env/
+
+# Banco local (recriado ao rodar server.py)
+ecocollect.db
+ecocollect.db-journal
+ecocollect.db-wal
+ecocollect.db-shm
+
+# Ambiente / segredos
+.env
+.env.*
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
