@@ -6,6 +6,8 @@ import base64
 import time
 import os
 import math
+import urllib.request
+import urllib.parse
 from flask import Flask, request, jsonify, g, send_from_directory
 from datetime import datetime
 
@@ -108,6 +110,7 @@ def init_db():
             email       TEXT UNIQUE NOT NULL,
             senha_hash  TEXT NOT NULL,
             tipo        TEXT NOT NULL CHECK(tipo IN ('gerador','coletor')),
+            roles       TEXT,
             telefone    TEXT,
             endereco    TEXT,
             cidade      TEXT DEFAULT 'Joinville',
@@ -334,11 +337,80 @@ def atualizar_nivel(pontos):
     if pontos >= 500:   return "Broto"
     return "Semente"
 
+
+def get_roles_for_user(user_id):
+    db = get_db()
+    row = db.execute("SELECT roles, tipo FROM usuarios WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return []
+    if row["roles"]:
+        try:
+            return json.loads(row["roles"])
+        except Exception:
+            return [row["tipo"]] if row["tipo"] else []
+    return [row["tipo"]] if row["tipo"] else []
+
+
+def has_role(role):
+    try:
+        return role in get_roles_for_user(g.user["id"])
+    except Exception:
+        return False
+
 # ─── frontend (mesmo serviço no Render) ───────────────────────────
 
 @app.route("/")
 def serve_index():
     return send_from_directory(ROOT_DIR, "index.html")
+
+@app.route("/api/auth/google-config", methods=["GET"])
+def google_config():
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    return jsonify({"google_client_id": client_id})
+
+def verify_google_token(id_token):
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not google_client_id:
+        return None
+    try:
+        url = "https://oauth2.googleapis.com/tokeninfo?id_token=" + urllib.parse.quote(id_token)
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get("aud") != google_client_id:
+            return None
+        if data.get("email_verified") not in ("true", "True", True, "1", 1):
+            return None
+        return data
+    except Exception:
+        return None
+
+@app.route("/api/auth/google", methods=["POST"])
+def google_login():
+    d = request.get_json(silent=True) or {}
+    id_token = d.get("id_token")
+    if not id_token:
+        return jsonify({"erro": "ID token do Google é obrigatório"}), 400
+    payload = verify_google_token(id_token)
+    if not payload:
+        return jsonify({"erro": "Falha ao verificar token do Google"}), 401
+    email = payload.get("email")
+    nome = payload.get("name") or email.split("@")[0]
+    tipo = d.get("tipo") if d.get("tipo") in ("gerador", "coletor", "ambos") else "gerador"
+    db = get_db()
+    user = db.execute("SELECT * FROM usuarios WHERE email=?", (email,)).fetchone()
+    if user is None:
+        try:
+            roles_val = json.dumps(["gerador"]) if tipo == "gerador" else (json.dumps(["coletor"]) if tipo == "coletor" else json.dumps(["gerador","coletor"]))
+            cur = db.execute(
+                "INSERT INTO usuarios (nome, email, senha_hash, tipo, roles, telefone, endereco, foto_url) VALUES (?,?,?,?,?,?,?,?)",
+                (nome, email, _hash(f"google:{email}"), ("gerador" if tipo=="ambos" else tipo), roles_val, None, None, payload.get("picture"))
+            )
+            db.commit()
+            user = db.execute("SELECT * FROM usuarios WHERE id=?", (cur.lastrowid,)).fetchone()
+        except sqlite3.IntegrityError:
+            return jsonify({"erro": "Erro ao criar usuário com Google"}), 500
+    token = criar_token(user["id"], user["tipo"])
+    return jsonify({"token": token, "usuario": _user_dict(user)})
 
 # ─── rotas de autenticação ────────────────────────────────────────
 
@@ -348,18 +420,21 @@ def cadastro():
     required = ["nome", "email", "senha", "tipo"]
     if not all(d.get(k) for k in required):
         return jsonify({"erro": "Campos obrigatórios: nome, email, senha, tipo"}), 400
-    if d["tipo"] not in ("gerador", "coletor"):
-        return jsonify({"erro": "Tipo deve ser 'gerador' ou 'coletor'"}), 400
+    if d["tipo"] not in ("gerador", "coletor", "ambos"):
+        return jsonify({"erro": "Tipo deve ser 'gerador', 'coletor' ou 'ambos'"}), 400
     db = get_db()
     try:
+        # suportar escolha de roles (gerador, coletor, ambos)
+        roles_val = json.dumps([d["tipo"]]) if d["tipo"] in ("gerador","coletor") else json.dumps(["gerador","coletor"])
+        tipo_store = ("gerador" if d["tipo"] == "ambos" else d["tipo"])
         cur = db.execute(
-            "INSERT INTO usuarios (nome, email, senha_hash, tipo, telefone, endereco) VALUES (?,?,?,?,?,?)",
-            (d["nome"], d["email"], _hash(d["senha"]), d["tipo"],
+            "INSERT INTO usuarios (nome, email, senha_hash, tipo, roles, telefone, endereco) VALUES (?,?,?,?,?,?,?)",
+            (d["nome"], d["email"], _hash(d["senha"]), tipo_store, roles_val,
              d.get("telefone"), d.get("endereco"))
         )
         db.commit()
         uid = cur.lastrowid
-        token = criar_token(uid, d["tipo"])
+        token = criar_token(uid, tipo_store)
         user = db.execute("SELECT * FROM usuarios WHERE id=?", (uid,)).fetchone()
         return jsonify({"token": token, "usuario": _user_dict(user)}), 201
     except sqlite3.IntegrityError:
@@ -384,12 +459,21 @@ def me():
     return jsonify(_user_dict(user))
 
 def _user_dict(u):
+    roles = []
+    try:
+        if u.get("roles"):
+            roles = json.loads(u.get("roles"))
+        else:
+            roles = [u.get("tipo")]
+    except Exception:
+        roles = [u.get("tipo")]
     return {
         "id": u["id"], "nome": u["nome"], "email": u["email"],
-        "tipo": u["tipo"], "telefone": u["telefone"],
+        "tipo": u["tipo"], "roles": roles, "telefone": u["telefone"],
         "endereco": u["endereco"], "cidade": u["cidade"],
         "pontos": u["pontos"], "nivel": u["nivel"],
         "total_kg": u["total_kg"], "total_coletas": u["total_coletas"],
+        "foto_url": u["foto_url"],
         "criado_em": u["criado_em"]
     }
 
@@ -398,7 +482,7 @@ def _user_dict(u):
 @app.route("/api/solicitacoes", methods=["POST"])
 @auth_required
 def criar_solicitacao():
-    if g.user["tipo"] != "gerador":
+    if not has_role("gerador"):
         return jsonify({"erro": "Apenas geradores podem criar solicitações"}), 403
     d = request.get_json(silent=True) or {}
     if not d.get("materiais") or not d.get("endereco"):
@@ -419,7 +503,7 @@ def criar_solicitacao():
 def listar_solicitacoes():
     db = get_db()
     status = request.args.get("status", "aberta")
-    if g.user["tipo"] == "coletor":
+    if has_role("coletor"):
         if status == "aceita":
             rows = db.execute("""
                 SELECT s.*, u.nome as gerador_nome, u.telefone as gerador_tel
@@ -444,7 +528,7 @@ def listar_solicitacoes():
 @app.route("/api/solicitacoes/<int:sid>/aceitar", methods=["POST"])
 @auth_required
 def aceitar_solicitacao(sid):
-    if g.user["tipo"] != "coletor":
+    if not has_role("coletor"):
         return jsonify({"erro": "Apenas coletores podem aceitar"}), 403
     db = get_db()
     sol = db.execute("SELECT * FROM solicitacoes WHERE id=?", (sid,)).fetchone()
@@ -461,7 +545,7 @@ def aceitar_solicitacao(sid):
 @app.route("/api/solicitacoes/<int:sid>/confirmar", methods=["POST"])
 @auth_required
 def confirmar_coleta(sid):
-    if g.user["tipo"] != "gerador":
+    if not has_role("gerador"):
         return jsonify({"erro": "Apenas o gerador pode confirmar a coleta"}), 403
     db = get_db()
     sol = db.execute("SELECT * FROM solicitacoes WHERE id=?", (sid,)).fetchone()
@@ -518,9 +602,13 @@ def rastreio_solicitacao(sid):
     """, (sid,)).fetchone()
     if not sol:
         return jsonify({"erro": "Solicitação não encontrada"}), 404
-    if g.user["tipo"] == "gerador" and sol["gerador_id"] != g.user["id"]:
-        return jsonify({"erro": "Acesso negado"}), 403
-    if g.user["tipo"] == "coletor" and sol["coletor_id"] != g.user["id"]:
+    # permitir acesso se o usuário for o gerador da solicitação ou o coletor designado
+    is_allowed = False
+    if has_role("gerador") and sol["gerador_id"] == g.user["id"]:
+        is_allowed = True
+    if has_role("coletor") and sol["coletor_id"] == g.user["id"]:
+        is_allowed = True
+    if not is_allowed:
         return jsonify({"erro": "Acesso negado"}), 403
     if sol["status"] != "aceita":
         return jsonify({
@@ -585,7 +673,7 @@ def ranking():
     db = get_db()
     rows = db.execute("""
         SELECT nome, pontos, nivel, total_kg, total_coletas
-        FROM usuarios WHERE tipo='gerador'
+        FROM usuarios WHERE roles LIKE '%"gerador"%'
         ORDER BY pontos DESC LIMIT 10
     """).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -600,8 +688,8 @@ def stats_gerais():
           SUM(CASE WHEN status='coletada' THEN 1 ELSE 0 END) as total_coletadas,
           SUM(CASE WHEN status='aberta' THEN 1 ELSE 0 END) as abertas,
           SUM(COALESCE(peso_real,0)) as total_kg,
-          (SELECT COUNT(*) FROM usuarios WHERE tipo='gerador') as geradores,
-          (SELECT COUNT(*) FROM usuarios WHERE tipo='coletor') as coletores
+          (SELECT COUNT(*) FROM usuarios WHERE roles LIKE '%"gerador"%') as geradores,
+          (SELECT COUNT(*) FROM usuarios WHERE roles LIKE '%"coletor"%') as coletores
         FROM solicitacoes
     """).fetchone()
     db.close()
