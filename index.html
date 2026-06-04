@@ -230,6 +230,14 @@
       <div class="auth-logo">Eco<span style="color:#000">Collect</span></div>
       <div class="auth-sub">Reciclagem sob demanda</div>
       <div id="erro-auth" class="erro-msg"></div>
+      <div id="google-auth" style="margin-bottom:16px; display:none;">
+        <div id="google-role-select" style="display:flex; gap:8px; margin-bottom:8px;">
+          <div class="tipo-btn sel" id="g-tipo-gerador" onclick="selecionarTipo('gerador')">Gerador</div>
+          <div class="tipo-btn" id="g-tipo-coletor" onclick="selecionarTipo('coletor')">Coletor</div>
+          <div class="tipo-btn" id="g-tipo-ambos" onclick="selecionarTipo('ambos')">Ambos</div>
+        </div>
+        <div id="google-signin-button" style="width:100%;"></div>
+      </div>
       <div id="form-login">
         <div class="form-group"><label class="form-label">E-mail</label><input id="login-email" class="form-input" type="email"></div>
         <div class="form-group"><label class="form-label">Senha</label><input id="login-senha" class="form-input" type="password"></div>
@@ -243,6 +251,7 @@
           <div class="tipo-row">
             <div class="tipo-btn sel" id="tipo-gerador" onclick="selecionarTipo('gerador')">Gerador</div>
             <div class="tipo-btn" id="tipo-coletor" onclick="selecionarTipo('coletor')">Coletor</div>
+            <div class="tipo-btn" id="tipo-ambos" onclick="selecionarTipo('ambos')">Ambos</div>
           </div>
         </div>
         <div class="form-group"><label class="form-label">Nome</label><input id="cad-nome" class="form-input"></div>
@@ -275,10 +284,14 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="https://accounts.google.com/gsi/client" async defer onload="googleAccountsOnLoad()"></script>
 <script>
 const API = "/api";
 const JOINVILLE = [-26.3045, -48.8487];
 let TOKEN = localStorage.getItem("eco_token");
+let GOOGLE_CLIENT_ID = null;
+let GOOGLE_SCRIPT_LOADED = false;
+let GOOGLE_BUTTON_RENDERED = false;
 let USER = null;
 let abaAtiva = "";
 let mostrandoPerfil = false;
@@ -286,6 +299,71 @@ let materiaisSel = [];
 let cache = { abertas: [], aceitas: [], coletadas: [] };
 
 let mapInst = null;
+
+window.onload = () => {
+  fetchGoogleConfig();
+};
+
+function onGoogleScriptLoad() {
+  GOOGLE_SCRIPT_LOADED = true;
+  renderGoogleButton();
+}
+
+async function fetchGoogleConfig() {
+  try {
+    const res = await fetch(API + "/auth/google-config");
+    const data = await res.json();
+    GOOGLE_CLIENT_ID = data.google_client_id;
+    if (GOOGLE_CLIENT_ID) {
+      document.getElementById("google-auth").style.display = "block";
+      renderGoogleButton();
+    }
+  } catch (error) {
+    console.warn("Não foi possível carregar configuração do Google:", error);
+  }
+}
+
+function renderGoogleButton() {
+  if (!GOOGLE_CLIENT_ID || !window.google?.accounts?.id || GOOGLE_BUTTON_RENDERED) return;
+  try {
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleGoogleCredentialResponse,
+      auto_select: false,
+      cancel_on_tap_outside: true,
+    });
+    google.accounts.id.renderButton(
+      document.getElementById("google-signin-button"),
+      { theme: "outline", size: "large", width: "100%", text: "signin_with" }
+    );
+    GOOGLE_BUTTON_RENDERED = true;
+  } catch (error) {
+    console.warn("Falha ao renderizar botão Google:", error);
+  }
+}
+
+async function handleGoogleCredentialResponse(response) {
+  if (!response?.credential) {
+    mostrarErro("erro-auth", "Falha no login com Google");
+    return;
+  }
+  try {
+    const tipo = tipoSel || "gerador";
+    const data = await api("POST", "/auth/google", { id_token: response.credential, tipo });
+    TOKEN = data.token;
+    USER = data.usuario;
+    localStorage.setItem("eco_token", TOKEN);
+    await iniciarApp();
+  } catch (error) {
+    mostrarErro("erro-auth", error.message);
+  }
+}
+
+function googleAccountsOnLoad() {
+  GOOGLE_SCRIPT_LOADED = true;
+  renderGoogleButton();
+}
+
 let rotaLayer = null, rotaFeitaLayer = null;
 let markerDestino = null, markerColetor = null;
 let markersPedidos = [];
@@ -357,6 +435,14 @@ function selecionarTipo(t) {
   tipoSel = t;
   document.getElementById("tipo-gerador").classList.toggle("sel", t === "gerador");
   document.getElementById("tipo-coletor").classList.toggle("sel", t === "coletor");
+  document.getElementById("tipo-ambos").classList.toggle("sel", t === "ambos");
+  // também refletir seleção no seletor do Google (se presente)
+  const g1 = document.getElementById("g-tipo-gerador");
+  const g2 = document.getElementById("g-tipo-coletor");
+  const g3 = document.getElementById("g-tipo-ambos");
+  if (g1) g1.classList.toggle("sel", t === "gerador");
+  if (g2) g2.classList.toggle("sel", t === "coletor");
+  if (g3) g3.classList.toggle("sel", t === "ambos");
 }
 
 async function fazerLogin() {
@@ -401,12 +487,18 @@ async function iniciarApp() {
     buildPillTabs();
     mostrarTela("app");
     initMapa();
-    if (USER.tipo === "gerador") {
+    const isGerador = USER.roles && USER.roles.includes("gerador");
+    const isColetor = USER.roles && USER.roles.includes("coletor");
+    if (isGerador && !isColetor) {
       await carregarDadosGerador();
       abaAtiva = cache.aceitas.length ? "coletas" : "solicitar";
-    } else {
+    } else if (isColetor && !isGerador) {
       await carregarDadosColetor();
       abaAtiva = "aceitar";
+    } else if (isGerador && isColetor) {
+      // usuário com ambas permissões: carregar dados de gerador por padrão
+      await carregarDadosGerador();
+      abaAtiva = cache.aceitas.length ? "coletas" : "solicitar";
     }
     buildPillTabs();
     renderSheet();
@@ -419,7 +511,8 @@ async function iniciarApp() {
 function setupHeader() {
   const badge = document.getElementById("badge-pontos");
   document.getElementById("btn-avatar").textContent = (USER.nome || "?")[0].toUpperCase();
-  if (USER.tipo === "gerador") {
+  const isGerador = USER.roles && USER.roles.includes("gerador");
+  if (isGerador) {
     badge.style.display = "inline";
     badge.textContent = USER.pontos.toLocaleString("pt-BR") + " pts";
   } else {
@@ -428,9 +521,10 @@ function setupHeader() {
 }
 
 function buildPillTabs() {
-  const tabs = USER.tipo === "gerador"
-    ? [{ id: "solicitar", label: "Solicitar Coleta" }, { id: "coletas", label: "Minhas Coletas" }]
-    : [{ id: "aceitar", label: "Aceitar Coleta" }, { id: "entregas", label: "Minhas Entregas" }];
+  const roles = USER.roles || [USER.tipo];
+  const tabs = [];
+  if (roles.includes("gerador")) tabs.push({ id: "solicitar", label: "Solicitar Coleta" }, { id: "coletas", label: "Minhas Coletas" });
+  if (roles.includes("coletor")) tabs.push({ id: "aceitar", label: "Aceitar Coleta" }, { id: "entregas", label: "Minhas Entregas" });
   document.getElementById("pill-tabs").innerHTML = tabs.map(t =>
     `<div class="tab${abaAtiva === t.id ? " active" : ""}" onclick="mudarAba('${t.id}')">${t.label}</div>`
   ).join("");
@@ -513,7 +607,8 @@ async function atualizarRastreioMapa() {
     const d = await api("GET", `/solicitacoes/${rastreioAtivoId}/rastreio`);
     if (!d.ativo) {
       pararRastreio();
-      if (USER.tipo === "gerador") { await carregarDadosGerador(); renderSheet(); }
+      const roles = USER.roles || [USER.tipo];
+      if (roles.includes("gerador")) { await carregarDadosGerador(); renderSheet(); }
       return;
     }
     rastreioData = d;
@@ -537,7 +632,8 @@ async function atualizarRastreioMapa() {
     mapInst.fitBounds(L.latLngBounds(rota.length ? rota : [[pos.lat, pos.lng], [dest.lat, dest.lng]]), {
       padding: [90, 30, 300, 30], maxZoom: 15,
     });
-    if (USER.tipo === "gerador" && abaAtiva === "coletas") renderSheet();
+    const roles = USER.roles || [USER.tipo];
+    if (roles.includes("gerador") && abaAtiva === "coletas") renderSheet();
     if (d.chegou) toast("Coletor chegou!");
   } catch (e) { console.error(e); }
 }
@@ -567,7 +663,11 @@ function renderSheet() {
     mapaPadrao();
     return;
   }
-  if (USER.tipo === "gerador") {
+  const roles = USER.roles || [USER.tipo];
+  const isGerador = roles.includes("gerador");
+  const isColetor = roles.includes("coletor");
+  const abaGerador = ["solicitar", "coletas"].includes(abaAtiva);
+  if (abaGerador && isGerador) {
     if (abaAtiva === "solicitar") {
       el.innerHTML = renderSolicitar();
       mapaPadrao();
@@ -582,7 +682,7 @@ function renderSheet() {
         mapaMarcadores(cache.abertas);
       }
     }
-  } else {
+  } else if (!abaGerador && isColetor) {
     if (abaAtiva === "aceitar") {
       el.innerHTML = renderColetorAceitar();
       mapaMarcadores(cache.abertas);
@@ -592,6 +692,14 @@ function renderSheet() {
       mapaMarcadores(cache.aceitas);
       pararRastreio();
     }
+  } else if (isGerador) {
+    // fallback to gerador view
+    if (abaAtiva === "solicitar") { el.innerHTML = renderSolicitar(); mapaPadrao(); }
+    else { if (cache.aceitas.length) { if (!rastreioAtivoId) rastreioAtivoId = cache.aceitas[0].id; gerenciarRastreio(cache.aceitas); el.innerHTML = renderColetasAtivas(); } else { pararRastreio(); el.innerHTML = renderColetasLista(); mapaMarcadores(cache.abertas); } }
+  } else if (isColetor) {
+    // fallback to coletor view
+    if (abaAtiva === "aceitar") { el.innerHTML = renderColetorAceitar(); mapaMarcadores(cache.abertas); pararRastreio(); }
+    else { el.innerHTML = renderColetorEntregas(); mapaMarcadores(cache.aceitas); pararRastreio(); }
   }
   setTimeout(() => mapInst?.invalidateSize(), 120);
 }
