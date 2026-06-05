@@ -318,7 +318,7 @@ def auth_required(f):
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         user = verificar_token(token)
         if not user:
-            return jsonify({"erro": "Não autorizado"}), 401
+            return jsonify({"erro": "Sessão inválida ou expirada. Faça login novamente."}), 401
         g.user = user
         return f(*args, **kwargs)
     return decorated
@@ -366,6 +366,8 @@ def serve_index():
 @app.route("/api/auth/google-config", methods=["GET"])
 def google_config():
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
+        return jsonify({"erro": "Google client ID não está configurado no servidor."}), 500
     return jsonify({"google_client_id": client_id})
 
 def verify_google_token(id_token):
@@ -389,10 +391,10 @@ def google_login():
     d = request.get_json(silent=True) or {}
     id_token = d.get("id_token")
     if not id_token:
-        return jsonify({"erro": "ID token do Google é obrigatório"}), 400
+        return jsonify({"erro": "Não foi possível fazer login com o Google. Tente novamente usando o botão de login do Google."}), 400
     payload = verify_google_token(id_token)
     if not payload:
-        return jsonify({"erro": "Falha ao verificar token do Google"}), 401
+        return jsonify({"erro": "Falha ao verificar o login do Google. Certifique-se de escolher uma conta válida e tente novamente."}), 401
     email = payload.get("email")
     nome = payload.get("name") or email.split("@")[0]
     tipo = d.get("tipo") if d.get("tipo") in ("gerador", "coletor", "ambos") else "gerador"
@@ -408,7 +410,7 @@ def google_login():
             db.commit()
             user = db.execute("SELECT * FROM usuarios WHERE id=?", (cur.lastrowid,)).fetchone()
         except sqlite3.IntegrityError:
-            return jsonify({"erro": "Erro ao criar usuário com Google"}), 500
+            return jsonify({"erro": "Não foi possível criar sua conta Google. Tente novamente mais tarde."}), 500
     token = criar_token(user["id"], user["tipo"])
     return jsonify({"token": token, "usuario": _user_dict(user)})
 
